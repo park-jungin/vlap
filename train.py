@@ -40,14 +40,6 @@ import regex as re
 import random
 from PIL import Image
 
-from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
-from evalfunc.tokenizer.ptbtokenizer import PTBTokenizer
-from evalfunc.bleu.bleu import Bleu
-from evalfunc.rouge.rouge import Rouge
-from evalfunc.cider.cider import Cider
-from evalfunc.meteor.meteor import Meteor
-from evalfunc.spice.spice import Spice
-
 from src.utils import (
     bool_flag,
     initialize_exp,

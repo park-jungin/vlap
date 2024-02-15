@@ -416,25 +416,6 @@ def main():
 
     cudnn.benchmark = True
 
-    # generate word distributions
-    # device_temp = torch.device('cuda:0')
-    # vocab_dist = torch.zeros(args.vocab_size).to(device)
-    # with torch.no_grad():
-    #     for it, (_, captions, _, _, _, _) in enumerate(train_loader):
-    #         labels = captions['input_ids'].to(device, non_blocking=True).squeeze()
-    #         for row in labels[:]:
-    #             vocab_dist[row] += 1
-    #         if it % 200 == 0:
-    #             print(it)
-                
-    # vocab_dist[0] = 0.
-    # total_vocab = vocab_dist.sum()
-    # vocab_dist /= total_vocab
-    # vocab_dist = list(vocab_dist.cpu().numpy())
-
-    # with open(os.path.join('./data/cc3m/train_val_test', 'VOCAB_DIST_OPT.json'), 'wb') as j:
-    #     pickle.dump(vocab_dist, j)
-
     print("Load vocab distribution")
 
     if args.text_encoder == 't5':
@@ -447,11 +428,6 @@ def main():
     print("Vocab distribution loaded")
 
     for epoch in range(start_epoch, args.epochs):
-        if (epoch + 1) % 5 == 0:
-            score_dict = test(val_loader, VisionModel, TextModel, model, CaptionModel, vocab_embedding, vocab_dist, device)
-            for method, score in score_dict.items():
-                print('%s:  %.4f' % (method, score))
-        
         # train the network for one epoch
         logger.info("================= Starting epoch %i ... =============" % epoch)
 
@@ -595,105 +571,6 @@ def train(train_loader, VisionModel, TextModel, model, CaptionModel, optimizer, 
     
 
 @torch.no_grad()
-def test(test_loader, VisionModel, TextModel, model, CaptionModel, vocab_embedding, vocab_dist, device):
-
-    VisionModel.eval()
-    TextModel.eval()
-    model.eval()
-    CaptionModel.eval()
-    end = time.time()
-
-    performance = AverageMeter()
-    bleu1_value = AverageMeter()
-    cider_value = AverageMeter()
-    meteor_value = AverageMeter()
-
-    cider_metric = Cider()
-    meteor_metric = Meteor()
-
-    if args.text_encoder == 't5':
-        tokenizer = AutoTokenizer.from_pretrained("t5-base", truncation=True, device_map="auto")
-    elif args.text_encoder == 'opt':
-        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-1.3b",
-                                                truncation=True, 
-                                                device_map="auto")
-
-    bs = 1
-    
-    scorers = [
-        (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
-        (Cider(), "CIDEr"),
-        (Meteor(), "METEOR"),
-        (Rouge(), "ROUGE_L"),
-        (Spice(), "SPICE")
-    ]
-    
-    hypotheses = []
-    references = []
-    for it, (imgs, sentences, input_ids) in enumerate(test_loader):
-        temperature = 1
-
-        imgs['pixel_values'] = imgs['pixel_values'].squeeze().unsqueeze(0).to(device, non_blocking=True)
-        vis_emb = VisionModel(**imgs).last_hidden_state
-        if vis_emb.shape[0] != 1:
-            vis_emb.unsqueeze(0)
-        vis_emb = model.module.img_projection(vis_emb)
-        input_ids['input_ids'] = input_ids['input_ids'].squeeze().unsqueeze(0).to(device, non_blocking=True)
-        input_ids['attention_mask'] = input_ids['attention_mask'].squeeze().unsqueeze(0).to(device, non_blocking=True)
-        encoder_inputs_embeds = TextModel(**input_ids).last_hidden_state
-        if len(vis_emb.shape) != 3:
-            vis_emb = vis_emb.unsqueeze(1)
-        encoder_inputs_embeds = torch.cat((vis_emb, encoder_inputs_embeds), 1)
-
-        if args.text_encoder == 'gpt2':
-            output_ids = CaptionModel.generate(inputs_embeds=encoder_inputs_embeds, 
-                                            max_new_tokens=40,
-                                            pad_token_id=tokenizer.eos_token_id,
-                                            num_beams=5,
-                                            no_repeat_ngram_size=2,
-                                            early_stopping=True, 
-                                            )
-            output = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
-        elif args.text_encoder == 't5':
-            output_ids = CaptionModel.generate(inputs_embeds=encoder_inputs_embeds, max_new_tokens=80)
-            output = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-        elif args.text_encoder == 'opt':
-            encoder_inputs_attention = torch.ones(
-                encoder_inputs_embeds.size()[:-1], dtype=torch.long, device=encoder_inputs_embeds.device
-            )
-            bos_ids = (
-                torch.LongTensor([[tokenizer.bos_token_id]])
-                .repeat(bs, 1).to(encoder_inputs_embeds.device)
-                )
-            bos_embeds = CaptionModel.get_input_embeddings()(bos_ids)
-            bos_mask = torch.ones_like(bos_ids)
-            encoder_inputs_attention = torch.cat([encoder_inputs_attention, bos_mask.to(encoder_inputs_attention.device)], dim=1)
-            encoder_inputs_embeds = torch.cat([encoder_inputs_embeds, bos_embeds.to(encoder_inputs_embeds.device)], dim=1)
-            output_ids = CaptionModel.generate(inputs_embeds=encoder_inputs_embeds, 
-                                            attention_mask=encoder_inputs_attention, 
-                                            # max_new_tokens=60,
-                                            no_repeat_ngram_size=2,
-                                            early_stopping=True)
-            output = tokenizer.batch_decode(output_ids,
-                                            skip_special_tokens=True, 
-                                            clean_up_tokenization_spaces=False)
-                                            
-        hypotheses.append(output)
-        references.append([sentences])
-
-        hypo = [[' '.join(hypo)] for hypo in [[str(x) for x in hypo] for hypo in hypotheses]]
-        ref = [[' '.join(reft) for reft in reftmp] for reftmp in [[[str(x) for x in reft] for reft in reftmp]for reftmp in references]]
-
-    score = []
-    method = []
-    for scorer, method_i in scorers:
-        score_i, scores_i = scorer.compute_score(ref, hypo)
-        score.extend(score_i) if isinstance(score_i, list) else score.append(score_i)
-        method.extend(method_i) if isinstance(method_i, list) else method.append(method_i)
-    score_dict = dict(zip(method,  score))
-
-    return score_dict
-
 def distributed_sinkhorn(out, vocab_dist):
     if len(out.shape) == 3:
         B = out.shape[0] * args.world_size
